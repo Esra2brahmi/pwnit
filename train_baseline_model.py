@@ -1,5 +1,5 @@
 """
-Train a RandomForest model on processed IOCs with proper balanced labels.
+Train a RandomForest model on processed IOCs with richer features.
 Usage:
   python3 train_baseline_model.py
 """
@@ -39,7 +39,7 @@ def compute_high_risk(row):
     if not first_seen:
         return 0
 
-    # Convert to datetime object
+    # Convert to datetime
     if isinstance(first_seen, str):
         try:
             first_seen_dt = datetime.strptime(first_seen, "%Y-%m-%d %H:%M:%S")
@@ -48,50 +48,50 @@ def compute_high_risk(row):
     else:
         first_seen_dt = first_seen
 
-    # Make tz-aware (UTC)
+    # Make tz-aware
     if first_seen_dt.tzinfo is None:
         first_seen_dt = first_seen_dt.replace(tzinfo=timezone.utc)
 
-    # Compute hours difference
     delta_hours = (now - first_seen_dt).total_seconds() / 3600
     return 1 if (delta_hours <= 48 or malware) else 0
 
 df["high_risk"] = df.apply(compute_high_risk, axis=1)
 
 # ---------------------------
-# Feature engineering
+# Extract features from nested "features" dict
 # ---------------------------
-# Days since first_seen
-def compute_days_since_first_seen(x):
-    if not x:
-        return 0
-    if isinstance(x, str):
-        try:
-            dt = datetime.strptime(x, "%Y-%m-%d %H:%M:%S")
-        except Exception:
-            return 0
-    else:
-        dt = x
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return (now - dt).days
+features_df = pd.json_normalize(df["features"])
 
-df["days_since_first_seen"] = df["first_seen"].apply(compute_days_since_first_seen)
+# Merge back into main dataframe
+for col in features_df.columns:
+    df[col] = features_df[col]
 
-# Fill missing threat_type / ioc_type
+# Fill missing values
 df["ioc_type"] = df["ioc_type"].fillna("unknown")
 df["threat_type"] = df["threat_type"].fillna("unknown")
+df["confidence"] = df["confidence"].fillna(0)
+df["has_malware"] = df["has_malware"].fillna(0)
+df["days_since_first_seen"] = df["days_since_first_seen"].fillna(0)
+df["days_since_last_seen"] = df["days_since_last_seen"].fillna(0)
+df["seen_duration_days"] = df["seen_duration_days"].fillna(0)
 
+# ---------------------------
 # Select features
-features = ["ioc_type", "threat_type", "days_since_first_seen"]
-X = df[features]
+# ---------------------------
+categorical = ["ioc_type", "threat_type"]
+numeric = ["confidence", "has_malware", "days_since_first_seen", "days_since_last_seen", "seen_duration_days"]
+
+X_cat = df[categorical]
+X_num = df[numeric]
 y = df["high_risk"]
 
 # One-hot encode categorical features
 encoder = OneHotEncoder(sparse_output=False, handle_unknown="ignore")
-X_encoded = encoder.fit_transform(X[["ioc_type", "threat_type"]])
-X_final = pd.DataFrame(X_encoded, columns=encoder.get_feature_names_out(["ioc_type", "threat_type"]))
-X_final["days_since_first_seen"] = X["days_since_first_seen"].values
+X_cat_encoded = encoder.fit_transform(X_cat)
+X_cat_df = pd.DataFrame(X_cat_encoded, columns=encoder.get_feature_names_out(categorical))
+
+# Combine numeric + encoded categorical
+X_final = pd.concat([X_num.reset_index(drop=True), X_cat_df.reset_index(drop=True)], axis=1)
 
 # ---------------------------
 # Train/test split

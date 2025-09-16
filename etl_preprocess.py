@@ -18,10 +18,6 @@ cursor = iocs.find(query).sort([("timestamp", -1)])
 if limit and limit > 0:
     cursor = cursor.limit(limit)
 
-# Categorical mappings
-ioc_type_map = {"domain": 0, "ip": 1, "md5": 2, "sha1": 3, "sha256": 4, "sha512": 5, "url": 6, "unknown": 7}
-threat_type_map = {}  # we will auto-fill as we see new threat types
-
 ops = []
 count = 0
 now = datetime.now(timezone.utc)
@@ -45,27 +41,39 @@ for ev in cursor:
     attrs = ev.get("Attribute", [])
     for a in attrs:
         ioc_type = a.get("type") or "unknown"
-        ioc_type_num = ioc_type_map.get(ioc_type.lower(), 7)
-        
         threat_type = a.get("threat_type") or "unknown"
-        if threat_type not in threat_type_map:
-            threat_type_map[threat_type] = len(threat_type_map)  # assign numeric id
-        threat_type_num = threat_type_map[threat_type]
+
 
         first_seen = to_dt(a.get("first_seen") or a.get("first_seen_utc"))
         last_seen = to_dt(a.get("last_seen") or a.get("last_seen_utc"))
 
-        days_since_first_seen = (now - first_seen).days if first_seen else None
+        # Ensure both are timezone-aware (UTC)
+        def make_aware(dt):
+            if dt is None:
+                return None
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=timezone.utc)
+            return dt
 
-        features = {
+
+    first_seen_aware = make_aware(first_seen)
+    last_seen_aware = make_aware(last_seen)
+    now_aware = make_aware(now)
+    days_since_first_seen = (now_aware - first_seen_aware).days if first_seen_aware else None
+    days_since_last_seen = (now_aware - last_seen_aware).days if last_seen_aware else days_since_first_seen
+    seen_duration_days = (last_seen_aware - first_seen_aware).days if first_seen_aware and last_seen_aware else None
+
+    features = {
             "has_malware": 1 if a.get("malware") else 0,
             "confidence": a.get("confidence_level") or 0,
-            "ioc_type": ioc_type_num,
-            "threat_type": threat_type_num,
-            "days_since_first_seen": days_since_first_seen
+            "ioc_type": ioc_type.lower(),
+            "threat_type": threat_type.lower(),
+            "days_since_first_seen": days_since_first_seen,
+            "days_since_last_seen": days_since_last_seen,
+            "seen_duration_days": seen_duration_days
         }
-
-        doc = {
+    
+    doc = {
             "value": a.get("value"),
             "ioc_type": ioc_type,
             "first_seen": first_seen,
@@ -76,9 +84,9 @@ for ev in cursor:
             "features": features,
             "updated_at": now
         }
-
-        ops.append(UpdateOne({"value": a.get("value"), "ioc_type": ioc_type}, {"$set": doc}, upsert=True))
-        count += 1
+    
+    ops.append(UpdateOne({"value": a.get("value"), "ioc_type": ioc_type}, {"$set": doc}, upsert=True))
+    count += 1
 
 if ops:
     res = processed.bulk_write(ops)
